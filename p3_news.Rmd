@@ -1,0 +1,243 @@
+---
+title: "Viral articles(P#3)"
+author: "Hyunpyo Kim"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This is a model for expecting viral articles, which share more than 1,400.
+The data set has 39,644 obersvations and 36 variables(except 'URL') which might explain the shares of articles. 
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+library(mosaic)
+library(tidyverse)
+library(class)
+library(foreach)
+library(knitr)
+library(kableExtra)
+
+news = read.csv("../data/online_news.csv")
+head(news, 5)
+ncol(news)
+```
+
+First, I make a linear regression model by expecting the number of shares and determining whether the artile is viral or not. 
+
+Second, I make a logit model by rogit regression with a "viral" variable, then show which model is better in expecting viral articles.
+
+### Data modifying
+
+First, I delete the "URL" variable which is not related to the modelling.
+Some variables, such as "n_tokens_content"(Number of words in the content), "average_token_length"(Average length of the words in the content), should not be zero, because there must be some words in the article. Thus, I think the data with zero "n_tokens_content" are imperfect, and those data also are zero in some variables such as "average_token_length".
+Thus, I delete those data, then there are 38,463 observations. 
+
+```{r}
+news = subset(news, select = -c(url))
+summary(news$n_tokens_content)
+news_0_content = news[which(news$n_tokens_content==0),]
+summary(news_0_content)
+news = news[-which(news$n_tokens_content==0),]
+```
+
+Next, the number of shares has a long right tail, and log(shares) looks well distributed.
+So, I use log(shares) for the linear regression, and make a new variable of logshares.
+
+```{r}
+hist(news$shares, xlim=c(1,10000), breaks=5000) ; abline(v=1400, col='red')
+hist(log(news$shares), breaks=50) ; abline(v=log(1400), col='red')
+summary(news$shares)
+news = mutate(news, logshares = log(shares))
+```
+
+Last, we can see that most data of "num_imgs"(Number of images) and "num_videos"(Number of videos) are zero or one. Thus, I make dummy variables for those variables.
+
+```{r}
+hist(news$num_imgs, xlim = c(0,50), breaks = 128)
+hist(news$num_videos, xlim = c(0,30), breaks = 91)
+news = mutate(news, img = ifelse(num_imgs==0,0,1))
+news = mutate(news, video = ifelse(num_videos==0,0,1))
+```
+
+### Data analysis
+
+It is difficult to find a strong relationship between log(shares) and other variables.
+Most variables show the following relationship.
+
+```{r}
+ggplot(data=news) + geom_point(aes(x=num_keywords, y=logshares), size=0.1) + geom_hline(yintercept = log(1400), col="red")
+```
+
+However, we can find a relationship with the 'data channel' dummy variables and 'weekday' dummy variables. 
+Data channel variables show an intercation relationship with image and video variables.
+Weekday variables show a relationship when it is weekend. I will use a "is_weekend" variable not "weekday_is_" variables.
+
+```{r}
+# data channel
+news_data_ch = select(news, data_channel_is_bus, data_channel_is_entertainment, 
+                      data_channel_is_lifestyle, data_channel_is_socmed, 
+                      data_channel_is_tech, data_channel_is_world)
+data_channel = factor(data.matrix(news_data_ch) %*% 1:ncol(news_data_ch), 
+                      labels = c("other", "bus", "entertn", "lifesty", "socmd", "tech", "world"))
+news_data_ch = data.frame(news_data_ch, data_channel, news$logshares, news$img, news$video)
+ggplot(data = news_data_ch) + geom_boxplot((aes(x=data_channel, y=news.logshares))) + 
+  geom_hline(yintercept = log(1400), col="red")
+
+ggplot(data = news_data_ch) + geom_boxplot((aes(x=factor(news.img), y=news.logshares))) +
+  facet_wrap( ~ data_channel, nrow = 1) +
+  geom_hline(yintercept = log(1400), col="red")
+
+ggplot(data = news_data_ch) + geom_boxplot((aes(x=factor(news.video), y=news.logshares))) +
+  facet_wrap( ~ data_channel, nrow = 1) +
+  geom_hline(yintercept = log(1400), col="red")
+# weekday
+news_days = select(news, weekday_is_monday, weekday_is_tuesday, weekday_is_wednesday,
+                   weekday_is_thursday, weekday_is_friday, weekday_is_saturday, weekday_is_sunday)
+days = factor(data.matrix(news_days) %*% 1:ncol(news_days), 
+              labels = c("Mon", "Tue", "Wed", "Thur", "Fri", "Sat", "Sun"))
+news_days = data.frame(news_days, days, news$logshares)
+ggplot(data = news_days) + geom_boxplot((aes(x=days, y=news.logshares))) + geom_hline(yintercept = log(1400), col="red")
+
+```
+
+
+## Modelling
+
+I split the data for training and testing. I use 80% data to build a model by training, and use other 20% data for test. The train and test data are selected randomly.
+
+```{r}
+## Split into training and testing sets
+n = nrow(news)
+n_train = round(0.8*n)  # round to nearest integer
+n_test = n - n_train
+```
+
+I will test the model by using confusion table. For this purpose, I define some functions.
+Because of random sampling, the model and the test result changes at each randoming sampling.
+So, I will repeat 100 times and average the test results.
+
+```{r}
+# define function
+## confidence table
+conf_table = function(y, yhat) {
+  y_test = ifelse(y>log(1400), 1, 0)
+  yh_t = ifelse(yhat>log(1400), 1, 0)
+  table(y_test, yh_t)
+}
+
+## conf_rate
+conf_rate = function(y, yhat) {
+  y_test = ifelse(y>log(1400), 1, 0)
+  yh_t = ifelse(yhat>log(1400), 1, 0)
+  sum(yh_t != y_test)/length(y)
+}
+```
+
+### Linear model
+
+First, I build a linear regresstion model by hand bulid and trial.
+I use overall error rate to find the best linear model.
+Model 3 is the initial model to check the additional performance of my hand-build model.
+By assumming the relationship of variables, buinding the model and testing it, I make the model 2.
+Then, I make a model 1 by deleting the variables which have low p-values.
+The test resule shows that model 1 has the least overall error rate, and this is the best linear model.
+I will do the performance check of my best linear model later, with the logit model in order to use the same sampling train and test data.
+
+```{r}
+err_vals = do(100)*{
+  
+  train_cases = sample.int(n, n_train, replace=FALSE)
+  test_cases = setdiff(1:n, train_cases)
+  news_train = news[train_cases,]
+  news_test = news[test_cases,]
+  
+  lm1 = lm(logshares ~ n_tokens_content + num_hrefs + num_self_hrefs + average_token_length + 
+             num_keywords + data_channel_is_lifestyle + 
+             num_imgs * (data_channel_is_bus + data_channel_is_socmed + data_channel_is_world) +
+             video * (data_channel_is_entertainment + data_channel_is_bus + 
+                        data_channel_is_socmed + data_channel_is_tech + data_channel_is_world) +
+             self_reference_avg_sharess * self_reference_max_shares + 
+             is_weekend + global_rate_positive_words * avg_positive_polarity + 
+             avg_negative_polarity + title_subjectivity + title_sentiment_polarity, 
+           data = news_train)
+  lm2 =  lm(logshares ~ n_tokens_title + n_tokens_content + num_hrefs + num_self_hrefs + 
+              average_token_length + num_keywords + (video + num_imgs) * 
+              (data_channel_is_lifestyle + data_channel_is_entertainment +
+                 data_channel_is_bus + data_channel_is_socmed +
+                 data_channel_is_tech + data_channel_is_world) +
+              self_reference_avg_sharess * (self_reference_min_shares + 
+                                              self_reference_max_shares) + is_weekend + 
+              global_rate_positive_words * avg_positive_polarity + 
+              global_rate_negative_words * avg_negative_polarity + title_subjectivity +
+              title_sentiment_polarity, data = news_train)
+  lm3 = lm(logshares ~ .-shares- weekday_is_sunday - is_weekend - img - video, data = news_train)
+
+  yhat_test1 = predict(lm1, news_test)
+  yhat_test2 = predict(lm2, news_test)
+  yhat_test3 = predict(lm3, news_test)
+
+  # confusion rate
+  c(conf_rate(news_test$logshares, yhat_test1), conf_rate(news_test$logshares, yhat_test2),
+    conf_rate(news_test$logshares, yhat_test3))
+  
+}
+colMeans(err_vals) %>% round(3)
+```
+
+
+### Classification model
+
+I use a logit model for the classification, because y is a binimial(viral or not) variable. 
+I build a logit model by using the same variables with the linear model.
+In order to show the averages of "Overall Error Rate", "True Positivie Rate", and "False Positive Rate" of a logit model and a linear model, I repeat 100 times and make averages of the results.
+As you can see, the logit model is better in terms of Overall Error Rate and False Positive Rate, but the linear model is better in terms of True Positive Rate.
+
+```{r}
+news = mutate(news, viral = ifelse(shares > 1400,1,0))
+
+errs_vals = do(100) * {
+  train_cases = sample.int(n, n_train, replace=FALSE)
+  test_cases = setdiff(1:n, train_cases)
+  news_train = news[train_cases,]
+  news_test = news[test_cases,]
+  
+  logit_m = glm(viral ~  n_tokens_content + num_hrefs + num_self_hrefs + average_token_length + 
+                  num_keywords + data_channel_is_lifestyle + num_imgs * 
+                  (data_channel_is_bus + data_channel_is_socmed + data_channel_is_world) + video * 
+                  (data_channel_is_entertainment + data_channel_is_bus + data_channel_is_socmed +
+                     data_channel_is_tech + data_channel_is_world) +  self_reference_avg_sharess * 
+                  self_reference_max_shares + is_weekend + global_rate_positive_words * 
+                  avg_positive_polarity + avg_negative_polarity +
+                  title_subjectivity + title_sentiment_polarity, data = news_train, family = 'binomial')
+  phat_logit = predict(logit_m, news_test, type = 'response')
+  yhat_logit = ifelse(phat_logit>0.5, 1, 0)
+  ct_lg = table(news_test$viral, yhat_logit)
+  
+  # linear
+  lmF = lm(logshares ~ n_tokens_content + num_hrefs + num_self_hrefs + average_token_length + 
+             num_keywords + data_channel_is_lifestyle + num_imgs * 
+             (data_channel_is_bus + data_channel_is_socmed + data_channel_is_world) + video * 
+             (data_channel_is_entertainment + data_channel_is_bus + data_channel_is_socmed +
+                data_channel_is_tech + data_channel_is_world) +  self_reference_avg_sharess * 
+             self_reference_max_shares + is_weekend + global_rate_positive_words * 
+             avg_positive_polarity + avg_negative_polarity +
+             title_subjectivity + title_sentiment_polarity, data = news_train)
+  yhatF = predict(lmF, news_test)
+  ct_lm = conf_table(news_test$logshares, yhatF)
+  
+  # result
+  c((1-sum(diag(ct_lg))/sum(ct_lg)), (1-sum(diag(ct_lm))/sum(ct_lm)),
+    ct_lg[2,2]/sum(ct_lg[2,]), ct_lm[2,2]/sum(ct_lm[2,]),
+    ct_lg[1,2]/sum(ct_lg[1,]), ct_lm[1,2]/sum(ct_lm[1,]))
+} 
+errMean = colMeans(errs_vals) %>% round(3)
+err = matrix(errMean, nrow = 2, dimnames = 
+               list(c("Classification Model", "Numerical Model"), 
+               c("OverallErrorRate", "TruePositiveRate", "FalsePositiveRate"))) 
+kable(err) %>% kable_styling("striped") 
+```
+
