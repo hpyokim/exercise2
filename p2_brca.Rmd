@@ -1,0 +1,270 @@
+---
+title: "A hospital audit(P#2)"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This is the result of auditting the hospital's breast cancer diagnostic screening.
+There are 5 radiologists, and they conducted 987 screenings by reading mammograms.
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+library(tidyverse)
+library(mosaic)
+library(knitr)
+library(kableExtra)
+```
+
+```{r}
+# data
+brca = read.csv("../data/brca.csv")
+head(brca)
+```
+
+First, I review the 5 radiologists' recalling history, and see who is more conservative to recall the patients.
+Second, I compare the radiologists' interpretations of mammpgrams with risk-factor-combined results.
+
+## Conservative Rate : who is more conservative to recall the patient
+
+### Simple result
+
+We can simply think that those who recall the patient frequently are more conservative.
+Following is the result by the idea.
+The radiologist89 is the most conservative radiologit.
+
+```{r}
+xtabs(~recall + radiologist, data = brca) %>% 
+  prop.table(margin = 2) %>% round(3) %>% kable() %>% kable_styling("striped", full_width = TRUE)
+```
+
+However, the patients radiologists examined are different. So, some are more likely to develop cancer, which makes the radiologist recalls the patient more frequently.
+Thus, I will make a model to predict cancer with risk factors, then deweight the recalling rate by the cancer probability of the patient, and calculate the conservative rate.
+
+### Cancer model
+
+#### Preparation
+
+Before I build the model, check the risk factors with cancer probability.
+
+* The relationship between age and cancer
+```{r}
+xtabs(~cancer + age, data = brca) %>% prop.table(margin=2) %>% 
+  round(3) %>% kable() %>% kable_styling("striped", full_width = TRUE)
+```
+
+* The relationship between history and cancer
+```{r}
+xtabs(~cancer + history, data = brca) %>% prop.table(margin=2) %>% 
+  round(3) %>% kable() %>% kable_styling("striped", full_width = TRUE)
+```
+
+* The relationship between symptoms and cancer
+```{r}
+xtabs(~cancer + symptoms, data = brca) %>% prop.table(margin=2) %>% 
+  round(3) %>% kable() %>% kable_styling("striped", full_width = TRUE)
+```
+
+* The relationship between menopause and cancer
+```{r}
+xtabs(~cancer + menopause, data = brca) %>% prop.table(margin=2) %>% 
+  round(3) %>% kable() %>% kable_styling("striped", full_width = TRUE)
+```
+
+* The relationship density symptoms and cancer
+```{r}
+xtabs(~cancer + density, data = brca) %>% prop.table(margin=2) %>% 
+  round(3) %>% kable() %>% kable_styling("striped", full_width = TRUE)
+```
+
+We can see that those who over 70 years old, or postmenounknown, or density 4 are likely to develop cancer. I make dummy variables for those features.
+
+```{r}
+brca = mutate(brca, old = ifelse(brca$age=='age70plus', 1, 0), 
+              menop = ifelse(brca$menopause=='postmenounknown', 1, 0),
+              dense = ifelse(brca$density=='density4', 1, 0))
+```
+
+Last, I define a functions to evaluate the model. I will use deviance for evaluation.
+
+```{r}
+dev_out = function(y, probhat) {
+  rc_pairs = cbind(seq_along(y), y)
+  -2*sum(log(probhat[rc_pairs]))
+}
+```
+
+#### modeling
+I build a model with train data(80%), and test the model with test data(20%).
+The train data are randomly selected, so I repeat 100 times the random sampling and modeling, and average the test result.
+I try 5 models at the same time. For a benchmark, I use the average cancer probability.
+With many trials, I make the models which are better than the benchmark. 
+Among them, Model 3 has the least deviance.
+
+```{r}
+### split 80% train and 20% test 
+n = nrow(brca) 
+n_train = round(0.8*n)
+n_test = n - n_train
+
+### averaging test result
+err_grid = do(100) * {
+  #### split train and test set
+  train_cases = sample.int(n, n_train, replace = FALSE)
+  test_cases = setdiff(1:n, train_cases)
+  brca_train = brca[train_cases,]
+  brca_test = brca[test_cases,]
+
+  #### bench mark; using a global cancer probability
+  p_bm = length(which(brca_test$cancer=="1"))/n_test
+  bm = rep(p_bm, times = n_test)
+  
+  #### logit
+  logit1 = glm(cancer ~ . - recall - radiologist - old - menop - dense, data = brca_train, family = 'binomial')
+  logit2 = glm(cancer ~ history + symptoms + old + menop + dense, data = brca_train, family = 'binomial')
+  logit3 = glm(cancer ~ history, data = brca_train, family = 'binomial')
+  logit4 = glm(cancer ~ history + symptoms, data = brca_train, family = 'binomial')
+  logit5 = glm(cancer ~ history + symptoms + old, data = brca_train, family = 'binomial')
+  
+  ##### likelyhood 
+  phat1 = predict(logit1, brca_test, type = "response")
+  phat2 = predict(logit2, brca_test, type = "response")
+  phat3 = predict(logit3, brca_test, type = "response")
+  phat4 = predict(logit4, brca_test, type = "response")
+  phat5 = predict(logit5, brca_test, type = "response")
+  
+  #### deviance
+  dev_bm = dev_out(brca_test$cancer, bm)
+  dev_logit1 = dev_out(brca_test$cancer, phat1)
+  dev_logit2 = dev_out(brca_test$cancer, phat2)
+  dev_logit3 = dev_out(brca_test$cancer, phat3)
+  dev_logit4 = dev_out(brca_test$cancer, phat4)
+  dev_logit5 = dev_out(brca_test$cancer, phat5)
+  
+  c(dev_bm, dev_logit1, dev_logit2, dev_logit3, dev_logit4, dev_logit5)
+}
+dev_table = data.frame(
+  Models = c("Cancer Prob(BM)", "Model1", "Model2", "Model3", "Model4", "Model5"),
+  Deviances = colMeans(err_grid)
+) 
+kable(t(dev_table)) %>% 
+  kable_styling("striped", full_width = TRUE) # select 'logit3' model
+```
+
+
+### Deweighting conservative rate
+
+To compare the consevative rate, split the data for each radiologist.
+
+```{r}
+brca_13 = brca[brca$radiologist=="radiologist13",]
+brca_34 = brca[brca$radiologist=="radiologist34",]
+brca_66 = brca[brca$radiologist=="radiologist66",]
+brca_89 = brca[brca$radiologist=="radiologist89",]
+brca_95 = brca[brca$radiologist=="radiologist95",]
+```
+
+I will deweight the consevative rate with the cancer probabilty by the model 3.
+
+```{r}
+logit_test = glm(cancer ~ history, data = brca, family = 'binomial')
+```
+
+Define a function to calculate the deweighting conservative rate.
+
+```{r}
+conserv = function(y) {
+  p_canc = predict(logit_test, y, type = "response")
+  recall_p_canc = y$recall/p_canc
+  sum(recall_p_canc)/nrow(y)
+} # more conservative for less cancer probabilities
+```
+
+Then, the conservative rates considering cancer probabiilty are as following.
+The result is the same as the simple result, the most conservative radiologist is radiologist89, and the others also the same.
+
+```{r}
+conserv_table = data.frame(
+  radiologist=c("radiologist13","radiologist34","radiologist66","radiologist89","radiologist95"),
+  conservative_rate=c(conserv(brca_13), conserv(brca_34), conserv(brca_66), conserv(brca_89), conserv(brca_95)))
+
+kable(t(conserv_table)) %>% 
+  kable_styling("striped", full_width = TRUE) # radiologist89 is the most conservative
+```
+
+## Adding risk factors to interpret the mammogram
+
+I compare the recall based cancer probability with the risk-factor based cancer probability. I split the data for train and test by random sampling. Then, repeat 100 times to bulid and test models, and average the results. 
+The radiologists should be minimizing false negatives and also minimizing false positive.
+So, I use a True Positive Rate(TPR) and a False Positive Rate(FPR) to evaluate the models.
+High TPR means minimizing false negatives, low FPR means minimizing false positive.
+These are the functions I will use to test the models.
+
+```{r}
+### function for TPR
+TPR = function(y, yhat) {
+  length(which(y==1 & yhat==1))/length(which(y==1))     
+  }
+
+### function for FPR
+FPR = function(y, yhat) {
+  length(which(y==0 & yhat==1))/length(which(y==0))
+}
+```
+
+This is the function to make yhat from phat.
+
+```{r}
+### function for yhat
+yhat = function(model, test_set){
+  phat = predict(model, test_set, type = "response")
+  ifelse(phat > 0.5, 1, 0)
+}
+```
+
+There are 4 results, the first is recall-only result, the second is the result of recall and all factors model, the third is the result of recall and the best predicting model, the last is the result of the best predicting model.
+However, all predicting model can not be used to determine whether the patients should visit the hospital or not. The phat results are mostly zero.
+We can see that the radiolosists' interetation is the best for determining the recall of the patient.
+
+```{r}
+test_grid = do(100) * {
+  
+  #### split train and test set
+  train_cases = sample.int(n, n_train, replace = FALSE)
+  test_cases = setdiff(1:n, train_cases)
+  brca_train = brca[train_cases,]
+  brca_test = brca[test_cases,]
+  
+  #### bench mark for confusion rate : cancer probabilty
+  #p_bm = length(which(brca_test$cancer=="1"))/n_test
+  #bm = rep(p_bm, times = n_test)
+  
+  #### logit
+  M_rf1 = glm(cancer ~ .- radiologist - old - menop - dense, data = brca_train, family = 'binomial')
+  M_rf2 = glm(cancer ~ recall + history, data = brca_train, family = 'binomial')
+  M_rf3 = glm(cancer ~ history, data = brca_train, family = 'binomial')
+  
+  ##### likelyhood and 
+  yh_rf1 = yhat(M_rf1, brca_test)
+  yh_rf2 = yhat(M_rf2, brca_test)
+  yh_rf3 = yhat(M_rf3, brca_test)
+  
+  #### TPR, FPR
+  c(TPR(brca_test$cancer,brca_test$recall), FPR(brca_test$cancer,brca_test$recall), 
+    TPR(brca_test$cancer,yh_rf1), FPR(brca_test$cancer,yh_rf1),
+    TPR(brca_test$cancer,yh_rf2), FPR(brca_test$cancer,yh_rf2),
+    TPR(brca_test$cancer,yh_rf3), FPR(brca_test$cancer,yh_rf3))
+}
+errMeans = colMeans(test_grid) %>% round(3)
+err = matrix(errMeans, nrow=2, dimnames = 
+                list(c("TPR", "FPR"), 
+                     c("Recall", "Model1", "Model2", "Model3")))
+kable(err) %>% kable_styling("striped", full_width = TRUE) 
+
+```
+
